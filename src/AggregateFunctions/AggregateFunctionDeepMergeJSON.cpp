@@ -3,9 +3,13 @@
 #include <AggregateFunctions/FactoryHelpers.h>
 #include <Core/Field.h>
 #include <DataTypes/DataTypesBinaryEncoding.h>
+#include <DataTypes/Serializations/SerializationObject.h>
 #include <IO/ReadBufferFromMemory.h>
 #include <IO/ReadBufferFromString.h>
 #include <IO/WriteBufferFromString.h>
+
+#pragma clang diagnostic ignored "-Wunused-parameter"
+#pragma clang diagnostic ignored "-Wunused-function"
 
 namespace DB
 {
@@ -49,13 +53,16 @@ void validateTotalSize(size_t total_size)
 
 bool DeepMergeJSONAggregateData::isObjectPath(const StringRef & path) const
 {
-    auto it = paths.upper_bound(path);
+    /*auto it = paths.upper_bound(path);
     return it != paths.end() && it->first.size > path.size && memcmp(it->first.data, path.data, path.size) == 0
         && it->first.data[path.size] == '.';
+        */
+    return false;
 }
 
 bool DeepMergeJSONAggregateData::handleDeletion(const StringRef & target_path, Arena * arena)
 {
+    /*
     auto it = paths.find(target_path);
 
     if (it == paths.end())
@@ -72,16 +79,17 @@ bool DeepMergeJSONAggregateData::handleDeletion(const StringRef & target_path, A
     }
 
     removeChildPaths(target_path);
+    */
     return true;
 }
 
 void DeepMergeJSONAggregateData::addPath(const StringRef & path, const Field & value, Arena *)
 {
+    /*
     auto it = paths.find(path);
     if (it != paths.end())
     {
-        it->second.value = value;
-        it->second.is_deleted = false;
+        object.insert(value);
     }
     else
     {
@@ -91,17 +99,35 @@ void DeepMergeJSONAggregateData::addPath(const StringRef & path, const Field & v
     /// Remove child paths if this is now a leaf value (non-object)
     if (!value.isNull() && value.getType() != Field::Types::Object)
         removeChildPaths(path);
+        */
 }
 
 void DeepMergeJSONAggregateData::removeChildPaths(const StringRef & parent_path)
 {
+    /*
     String prefix = parent_path.toString() + ".";
     auto it = paths.lower_bound(StringRef(prefix));
 
-    while (it != paths.end() && it->first.size >= prefix.size() && memcmp(it->first.data, prefix.data(), prefix.size()) == 0)
+    for (auto it = object.typed_paths.begin(); it != paths.end();)
     {
-        it = paths.erase(it);
+        //if (it->first.size >= prefix.size() && memcmp(it->first.data, prefix.data(), prefix.size()) == 0)
+        if (it->first.starts_with(prefix)) {
+            it = typed_paths.erase(it);
+        } else {
+            it++;
+        }
     }
+
+    for (auto it = object.dynamic_paths.begin(); it != paths.end();)
+    {
+        //if (it->first.size >= prefix.size() && memcmp(it->first.data, prefix.data(), prefix.size()) == 0)
+        if (it->first.starts_with(prefix)) {
+            it = dynamic_paths.erase(it);
+        } else {
+            it++;
+        }
+    }
+    */
 }
 
 void AggregateFunctionDeepMergeJSON::add(AggregateDataPtr __restrict place, const IColumn ** columns, size_t row_num, Arena * arena) const
@@ -109,7 +135,8 @@ void AggregateFunctionDeepMergeJSON::add(AggregateDataPtr __restrict place, cons
     auto & aggregate_data = data(place);
     const auto & col_object = assert_cast<const ColumnObject &>(*columns[0]);
 
-    processColumnObject(col_object, row_num, aggregate_data, arena);
+    aggregate_data.object = const_cast<ColumnObject*>(&col_object);
+  //  processColumnObject(col_object, row_num, aggregate_data, arena);
 }
 
 void AggregateFunctionDeepMergeJSON::processPath(
@@ -136,24 +163,10 @@ void AggregateFunctionDeepMergeJSON::processPath(
 void AggregateFunctionDeepMergeJSON::processColumnObject(
     const ColumnObject & col_object, size_t row_num, DeepMergeJSONAggregateData & aggregate_data, Arena * arena) const
 {
+    /*
     /// Process typed paths
-    for (const auto & [path, column] : col_object.getTypedPaths())
-    {
-        Field value;
-        column->get(row_num, value);
-        processPath(StringRef(path), value, aggregate_data, arena);
-    }
 
     /// Process dynamic paths
-    for (const auto & [path, dynamic_column] : col_object.getDynamicPathsPtrs())
-    {
-        if (!dynamic_column->isNullAt(row_num))
-        {
-            Field value;
-            dynamic_column->get(row_num, value);
-            processPath(StringRef(path), value, aggregate_data, arena);
-        }
-    }
 
     /// Process shared data
     const auto [shared_data_paths, shared_data_values] = col_object.getSharedDataPathsAndValues();
@@ -180,13 +193,21 @@ void AggregateFunctionDeepMergeJSON::processColumnObject(
     }
 
     validatePathsCount(aggregate_data.paths.size());
+    */
 }
 
 void AggregateFunctionDeepMergeJSON::merge(AggregateDataPtr __restrict place, ConstAggregateDataPtr rhs, Arena * arena) const
 {
     auto & aggregate_data = data(place);
     const auto & rhs_data = data(rhs);
+    if (aggregate_data.object == nullptr) {
+        aggregate_data.object = rhs_data.object;
+    } else if (rhs_data.object != nullptr) {
+        auto rhs_object = rhs_data.object;
+        aggregate_data.object->insertRangeFrom(*rhs_object, 0, rhs_object->size());
+    }
 
+    /*
     /// Merge paths from rhs, treating them as latest values
     for (const auto & [path, path_data] : rhs_data.paths)
     {
@@ -202,108 +223,70 @@ void AggregateFunctionDeepMergeJSON::merge(AggregateDataPtr __restrict place, Co
     }
 
     validatePathsCount(aggregate_data.paths.size());
+    */
 }
 
 void AggregateFunctionDeepMergeJSON::serialize(
     ConstAggregateDataPtr __restrict place, WriteBuffer & buf, [[maybe_unused]] std::optional<size_t> version) const
 {
     const auto & aggregate_data = data(place);
-
-    writeVarUInt(aggregate_data.paths.size(), buf);
-
-    size_t total_size = 0;
-
-    for (const auto & [path, path_data] : aggregate_data.paths)
-    {
-        writeStringBinary(path, buf);
-        writeBinary(path_data.is_deleted, buf);
-
-        /// Serialize Field
-        WriteBufferFromOwnString field_buf;
-        writeFieldBinary(path_data.value, field_buf);
-        writeStringBinary(field_buf.str(), buf);
-
-        total_size += path.size + field_buf.str().size();
-        validateTotalSize(total_size);
-    }
+    if (aggregate_data.object == nullptr) return;
+    DataTypeObject dto(DataTypeObject::SchemaFormat::JSON);
+    auto serialization = dto.getDefaultSerialization();
+    Field field = (*aggregate_data.object)[0];
+    serialization->serializeBinary(field, buf, {});
 }
 
 void AggregateFunctionDeepMergeJSON::deserialize(
     AggregateDataPtr __restrict place, ReadBuffer & buf, [[maybe_unused]] std::optional<size_t> version, Arena * arena) const
 {
     auto & aggregate_data = data(place);
-    aggregate_data.paths.clear();
-
-    size_t num_paths;
-    readVarUInt(num_paths, buf);
-    validatePathsCount(num_paths);
-
-    size_t total_size = 0;
-
-    for (size_t i = 0; i < num_paths; ++i)
-    {
-        String path_str;
-        readStringBinary(path_str, buf);
-        validatePathLength(path_str.size());
-
-        bool is_deleted;
-        readBinary(is_deleted, buf);
-
-        String value_str;
-        readStringBinary(value_str, buf);
-
-        total_size += path_str.size() + value_str.size();
-        validateTotalSize(total_size);
-
-        /// Deserialize Field
-        ReadBufferFromString value_buf(value_str);
-        Field value = readFieldBinary(value_buf);
-
-        auto interned_path = internString(path_str, arena);
-        aggregate_data.paths[interned_path] = DeepMergeJSONAggregateData::PathData{value, is_deleted};
+    if (buf.available() == 0) {
+        aggregate_data.object = nullptr;
     }
+    DataTypeObject dto(DataTypeObject::SchemaFormat::JSON);
+    auto serialization = dto.getDefaultSerialization();
+    Field field = (*aggregate_data.object)[0];
+    serialization->deserializeBinary(field, buf, {});
 }
 
 void AggregateFunctionDeepMergeJSON::insertResultInto(AggregateDataPtr __restrict place, IColumn & to, [[maybe_unused]] Arena * arena) const
 {
     const auto & aggregate_data = data(place);
-    Object result_object;
+    auto & col_object = assert_cast<ColumnObject &>(to);
+    if (aggregate_data.object != nullptr && aggregate_data.object->size() > 0) {
+        size_t lastIndex = aggregate_data.object->size();
+        for (const auto & [path, column] : aggregate_data.object->getTypedPaths())
+            col_object.getTypedPaths()[path]->insertFrom(*column, lastIndex - 1);
 
-    /// Helper function to set a value in a nested object structure
-    auto set_nested_value = [](Object & obj, const std::string & path, const Field & value)
-    {
-        size_t pos = 0;
-        Object * current = &obj;
-
-        while (pos < path.length())
+        for (const auto & [path, column] : aggregate_data.object->getDynamicPaths())
         {
-            size_t dot_pos = path.find('.', pos);
-            std::string key = (dot_pos == std::string::npos) ? path.substr(pos) : path.substr(pos, dot_pos - pos);
-
-            if (dot_pos == std::string::npos)
+            /// Output only non-null values from dynamic paths. We cannot distinguish cases when
+            /// dynamic path has Null value and when it's absent in the row and consider them equivalent.
+            for (size_t n = lastIndex - 1; n != SIZE_MAX; n--)
             {
-                (*current)[key] = value;
-                break;
+                if (!column->isNullAt(n)) {
+                    if (auto it = col_object.getDynamicPaths().find(path); it != col_object.getDynamicPaths().end())
+                        it->second->insertFrom(*column, n);
+                    /// Try to add a new dynamic path.
+                    else if (auto * dynamic_path_column = col_object.tryToAddNewDynamicPath(path))
+                        dynamic_path_column->insertFrom(*column, n);
+                    /// Limit on dynamic paths is reached, add path to shared data later.
+                    // else
+                    //    src_dynamic_paths_for_shared_data.push_back(path);
+                    break;
+                }
+                if (n == 0) break;
             }
-
-            // Intermediate component - ensure it's an object
-            if (!current->contains(key) || current->at(key).getType() != Field::Types::Object)
-                (*current)[key] = Object();
-
-            Field & field = (*current)[key];
-            current = &field.safeGet<Object>();
-            pos = dot_pos + 1;
         }
-    };
 
-    /// Convert flat paths back to nested object structure
-    for (const auto & [path_ref, path_data] : aggregate_data.paths)
-    {
-        if (!path_data.is_deleted && !aggregate_data.isObjectPath(path_ref))
-            set_nested_value(result_object, path_ref.toString(), path_data.value);
+        // TODO shared data
+        //to.insertRangeFrom(*aggregate_data.object, 0, );
+        // to.insert((*aggregate_data.object)[0]);
+        to.insertRangeFrom(*aggregate_data.object, 0, 1);
+    } else {
+        to.insertDefault();
     }
-
-    to.insert(result_object);
 }
 
 void AggregateFunctionDeepMergeJSON::addBatchSinglePlace(
@@ -320,9 +303,10 @@ void AggregateFunctionDeepMergeJSON::addBatchSinglePlace(
     const auto & col_object = assert_cast<const ColumnObject &>(*columns[0]);
     auto & aggregate_data = data(place);
 
-    for (size_t row = row_begin; row < row_end; ++row)
-    {
-        processColumnObject(col_object, row, aggregate_data, arena);
+    if (aggregate_data.object == nullptr) {
+        aggregate_data.object = new ColumnObject(col_object);
+    } else {
+        aggregate_data.object->insertRangeFrom(col_object, row_begin, row_end - row_begin);
     }
 }
 

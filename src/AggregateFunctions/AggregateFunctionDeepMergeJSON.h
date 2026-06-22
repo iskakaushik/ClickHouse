@@ -26,16 +26,7 @@ constexpr size_t MAX_JSON_MERGE_TOTAL_SIZE = 100_MiB;
 
 struct DeepMergeJSONAggregateData
 {
-    struct PathData
-    {
-        Field value;
-        // Track if this path was explicitly deleted
-        bool is_deleted = false;
-    };
-
-    /// Use std::map to keep paths sorted for consistent output
-    /// StringRef will point to Arena-allocated memory
-    std::map<StringRef, PathData> paths;
+    ColumnObject * object = nullptr;
 
     /// Check if a path represents an object (has children)
     bool isObjectPath(const StringRef & path) const;
